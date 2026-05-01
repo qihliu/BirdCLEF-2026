@@ -215,6 +215,7 @@ class BirdTrainDataset(Dataset):
         self.mel_tf = mel_transform
         self.spec_aug = spec_augment
         self.use_secondary = cfg.USE_SECONDARY_LABELS
+        self.sr = cfg.SAMPLE_RATE
 
         # Precompute secondary label lists (avoid ast.literal_eval in hot path)
         self._secondary = [
@@ -244,7 +245,7 @@ class BirdTrainDataset(Dataset):
         path = os.path.join(self.audio_base_dir, str(row["filename"]))
 
         try:
-            waveform, _ = librosa.load(path, sr=self.cfg.SAMPLE_RATE, mono=True)
+            waveform, _ = librosa.load(path, sr=self.sr, mono=True)
             if len(waveform) == 0:
                 raise ValueError("empty audio")
         except Exception:

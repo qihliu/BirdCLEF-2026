@@ -31,8 +31,10 @@ def load_model(checkpoint_path: str, cfg: CFG, device: torch.device) -> BirdMode
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
     model.eval()
-    val_cmap = ckpt.get("val_cmap", "?")
-    print(f"  Loaded {os.path.basename(checkpoint_path)}  (val_cmAP={val_cmap})")
+    snd_cmap  = ckpt.get("snd_cmap",  ckpt.get("val_cmap", "?"))
+    clip_cmap = ckpt.get("clip_cmap", "?")
+    print(f"  Loaded {os.path.basename(checkpoint_path)}  "
+          f"(snd_cmAP={snd_cmap}, clip_cmAP={clip_cmap})")
     return model
 
 
