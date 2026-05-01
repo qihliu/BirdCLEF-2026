@@ -20,12 +20,13 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import average_precision_score
 from sklearn.model_selection import StratifiedKFold
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from config import CFG, get_device, resolve_paths
 from dataset import (BirdTrainDataset, SoundscapeTrainDataset,
-                     build_species_info)
+                     build_species_info, compute_pos_weights,
+                     compute_sample_weights)
 from model import BirdModel
 from transforms import (AudioTransform, MelSpecTransform, SpecAugment,
                          mixup_criterion, mixup_data)
@@ -260,14 +261,39 @@ def run_fold(
         val_audio_tf, mel_tf, None, cfg,
     )
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.BATCH_SIZE,
-        shuffle=True,
-        num_workers=cfg.NUM_WORKERS,
-        pin_memory=cfg.PIN_MEMORY and device.type == "cuda",
-        drop_last=True,
-    )
+    # ── Weighted sampler (class-imbalance) ────────────────────────────────────
+    if cfg.USE_WEIGHTED_SAMPLER:
+        ssl_df = pd.read_csv(soundscape_df_path).drop_duplicates(
+            subset=["filename", "start", "end"]
+        )
+        sample_weights = compute_sample_weights(
+            train_df, len(snd_train_ds), power=cfg.SAMPLER_POWER
+        )
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_ds),
+            replacement=True,
+        )
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.BATCH_SIZE,
+            sampler=sampler,          # mutually exclusive with shuffle=True
+            num_workers=cfg.NUM_WORKERS,
+            pin_memory=cfg.PIN_MEMORY and device.type == "cuda",
+            drop_last=True,
+        )
+        print(f"  WeightedRandomSampler enabled (power={cfg.SAMPLER_POWER})")
+    else:
+        ssl_df = None
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.BATCH_SIZE,
+            shuffle=True,
+            num_workers=cfg.NUM_WORKERS,
+            pin_memory=cfg.PIN_MEMORY and device.type == "cuda",
+            drop_last=True,
+        )
+
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg.BATCH_SIZE * 2,
@@ -276,8 +302,20 @@ def run_fold(
         pin_memory=cfg.PIN_MEMORY and device.type == "cuda",
     )
 
-    model = BirdModel(cfg).to(device)
-    criterion = nn.BCEWithLogitsLoss()
+    # ── Loss with optional pos_weight (class-imbalance) ───────────────────────
+    if cfg.USE_POS_WEIGHT:
+        if ssl_df is None:
+            ssl_df = pd.read_csv(soundscape_df_path).drop_duplicates(
+                subset=["filename", "start", "end"]
+            )
+        pos_weight = compute_pos_weights(
+            train_df, ssl_df, species_info, max_weight=cfg.POS_WEIGHT_MAX
+        ).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        print(f"  pos_weight enabled (max={cfg.POS_WEIGHT_MAX}, "
+              f"mean={pos_weight.mean().item():.2f})")
+    else:
+        criterion = nn.BCEWithLogitsLoss()
     optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg, steps_per_epoch=len(train_loader))
     scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None

@@ -65,6 +65,17 @@ class CFG:
     MIN_RATING: float = 0.0           # keep all clips; raise to 3.0 for quality filter
     USE_SECONDARY_LABELS: bool = True
 
+    # ── Class imbalance ───────────────────────────────────────────────────────
+    # WeightedRandomSampler: weight per clip = 1 / count^SAMPLER_POWER
+    #   power=0.0 → uniform (off), 0.5 → square-root (default), 1.0 → full inverse
+    USE_WEIGHTED_SAMPLER: bool = True
+    SAMPLER_POWER: float = 0.5
+
+    # pos_weight in BCEWithLogitsLoss: penalises false negatives for rare classes
+    #   weight[c] = n_negative[c] / n_positive[c], capped at POS_WEIGHT_MAX
+    USE_POS_WEIGHT: bool = True
+    POS_WEIGHT_MAX: float = 10.0
+
     # ── Augmentation ──────────────────────────────────────────────────────────
     FREQ_MASK_MAX: int = 30
     TIME_MASK_MAX: int = 80

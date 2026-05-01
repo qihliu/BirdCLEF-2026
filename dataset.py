@@ -70,6 +70,87 @@ def _parse_secondary(raw: str) -> List[str]:
     return []
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Class-imbalance utilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_sample_weights(
+    bird_df: pd.DataFrame,
+    n_soundscape_windows: int,
+    power: float = 0.5,
+) -> torch.Tensor:
+    """
+    Compute per-sample weights for WeightedRandomSampler.
+
+    Bird clips: weight = 1 / count(primary_label) ^ power
+      power=0.5 (default) is the square-root schedule — a good middle ground
+      between uniform sampling (power=0) and full inverse-frequency (power=1).
+      Full inverse-frequency oversamples 1-clip species 499x, risking severe
+      overfitting; square-root dampens this to ~22x.
+
+    Soundscape windows: assigned the mean weight of bird clips so they
+      contribute neutrally (domain-adaptation signal, not imbalance correction).
+    """
+    counts = bird_df["primary_label"].astype(str).value_counts()
+    bird_weights = torch.tensor(
+        [1.0 / (float(counts.get(str(row["primary_label"]), 1)) ** power)
+         for _, row in bird_df.iterrows()],
+        dtype=torch.float32,
+    )
+    mean_w = bird_weights.mean().item()
+    snd_weights = torch.full((n_soundscape_windows,), mean_w, dtype=torch.float32)
+    return torch.cat([bird_weights, snd_weights])
+
+
+def compute_pos_weights(
+    bird_df: pd.DataFrame,
+    ssl_df: pd.DataFrame,
+    species_info: Dict,
+    max_weight: float = 10.0,
+) -> torch.Tensor:
+    """
+    Compute positive-class weights for BCEWithLogitsLoss.
+
+    For each class c:
+        pos_weight[c] = n_negative[c] / n_positive[c]
+
+    This penalises false negatives for rare classes proportionally.
+    Capped at max_weight (default 10) to prevent a single rare-species
+    false-negative from dominating the entire loss batch.
+
+    Without the cap, a species with 1 clip would get pos_weight ≈ 35,548,
+    making training numerically unstable.
+    """
+    label_to_idx = species_info["label_to_idx"]
+    n_classes = len(label_to_idx)
+    pos_counts = np.zeros(n_classes, dtype=np.float64)
+
+    # Positives from train_audio clips
+    for _, row in bird_df.iterrows():
+        idx = label_to_idx.get(str(row["primary_label"]))
+        if idx is not None:
+            pos_counts[idx] += 1.0
+        for sec in _parse_secondary(str(row["secondary_labels"])):
+            sidx = label_to_idx.get(sec)
+            if sidx is not None:
+                pos_counts[sidx] += 1.0
+
+    # Positives from labeled soundscape windows
+    for _, row in ssl_df.iterrows():
+        for sp in str(row["primary_label"]).split(";"):
+            idx = label_to_idx.get(sp.strip())
+            if idx is not None:
+                pos_counts[idx] += 1.0
+
+    n_total = len(bird_df) + len(ssl_df)
+    neg_counts = n_total - pos_counts
+    # Avoid div-by-zero for classes with no positives → assign max weight
+    with np.errstate(divide="ignore", invalid="ignore"):
+        weights = np.where(pos_counts > 0, neg_counts / pos_counts, max_weight)
+    weights = np.clip(weights, 1.0, max_weight)
+    return torch.tensor(weights, dtype=torch.float32)
+
+
 def _hms_to_sec(hms: str) -> int:
     """Convert 'HH:MM:SS' to integer seconds."""
     h, m, s = hms.strip().split(":")
