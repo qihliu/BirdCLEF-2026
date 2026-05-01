@@ -65,6 +65,14 @@ class CFG:
     MIN_RATING: float = 0.0           # keep all clips; raise to 3.0 for quality filter
     USE_SECONDARY_LABELS: bool = True
 
+    # ── Soundscape validation ─────────────────────────────────────────────────
+    # File-level holdout from the 66 labeled soundscape files.
+    # These windows are domain-matched to the test set (PAM recordings),
+    # so soundscape_cmAP is the primary checkpoint-selection metric.
+    # Clip val (all 234 species, stable signal) is kept for learning-curve tracking.
+    SOUNDSCAPE_VAL_FRACTION: float = 0.2   # ~13 files / ~147 windows held out
+    CKPT_METRIC: str = "soundscape_cmap"   # "soundscape_cmap" | "clip_cmap"
+
     # ── Class imbalance ───────────────────────────────────────────────────────
     # WeightedRandomSampler: weight per clip = 1 / count^SAMPLER_POWER
     #   power=0.0 → uniform (off), 0.5 → square-root (default), 1.0 → full inverse

@@ -157,6 +157,35 @@ def _hms_to_sec(hms: str) -> int:
     return int(h) * 3600 + int(m) * 60 + int(s)
 
 
+def split_soundscape_labels(
+    labels_csv_path: str,
+    val_fraction: float = 0.2,
+    seed: int = 42,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    File-level train/val split of labeled soundscape windows.
+
+    Split is on unique *filenames*, not individual windows, to prevent
+    data leakage: consecutive 5-second windows from the same recording
+    share the same acoustic environment and are highly correlated.
+
+    Returns:
+        (train_df, val_df) — both deduplicated on (filename, start, end).
+    """
+    df = pd.read_csv(labels_csv_path).drop_duplicates(
+        subset=["filename", "start", "end"]
+    ).reset_index(drop=True)
+
+    files = df["filename"].unique()
+    rng = np.random.RandomState(seed)
+    n_val = max(1, int(len(files) * val_fraction))
+    val_files = set(rng.choice(files, size=n_val, replace=False))
+
+    train_df = df[~df["filename"].isin(val_files)].reset_index(drop=True)
+    val_df   = df[ df["filename"].isin(val_files)].reset_index(drop=True)
+    return train_df, val_df
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Training dataset: short clips from train_audio/
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,13 +288,17 @@ class SoundscapeTrainDataset(Dataset):
     """
     Labeled 5-second windows extracted from train_soundscapes/ soundscapes.
 
+    Accepts either a CSV path (reads + deduplicates) or a pre-filtered
+    DataFrame (e.g. from split_soundscape_labels) so it can be reused
+    for both training and soundscape validation without duplication.
+
     Uses a per-worker LRU cache to avoid reloading the same soundscape file
     multiple times within one epoch.
     """
 
     def __init__(
         self,
-        labels_csv_path: str,
+        labels_df_or_path,            # pd.DataFrame or str path to CSV
         soundscapes_dir: str,
         species_info: Dict,
         audio_transform: AudioTransform,
@@ -273,9 +306,11 @@ class SoundscapeTrainDataset(Dataset):
         spec_augment: Optional[SpecAugment],
         cfg: CFG,
     ):
-        df = pd.read_csv(labels_csv_path)
-        # Deduplicate: the CSV contains duplicate rows
-        df = df.drop_duplicates(subset=["filename", "start", "end"]).reset_index(drop=True)
+        if isinstance(labels_df_or_path, pd.DataFrame):
+            df = labels_df_or_path.reset_index(drop=True)
+        else:
+            df = pd.read_csv(labels_df_or_path)
+            df = df.drop_duplicates(subset=["filename", "start", "end"]).reset_index(drop=True)
 
         self.df = df
         self.soundscapes_dir = soundscapes_dir

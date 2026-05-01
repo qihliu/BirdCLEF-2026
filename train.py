@@ -26,7 +26,7 @@ from tqdm import tqdm
 from config import CFG, get_device, resolve_paths
 from dataset import (BirdTrainDataset, SoundscapeTrainDataset,
                      build_species_info, compute_pos_weights,
-                     compute_sample_weights)
+                     compute_sample_weights, split_soundscape_labels)
 from model import BirdModel
 from transforms import (AudioTransform, MelSpecTransform, SpecAugment,
                          mixup_criterion, mixup_data)
@@ -245,27 +245,40 @@ def run_fold(
     mel_tf         = MelSpecTransform(cfg)
     spec_aug       = SpecAugment(cfg)
 
-    # Training data: clip dataset + soundscape windows (always in train)
+    # ── Soundscape train/val split (file-level, fixed across folds) ──────────
+    snd_train_df, snd_val_df = split_soundscape_labels(
+        soundscape_df_path,
+        val_fraction=cfg.SOUNDSCAPE_VAL_FRACTION,
+        seed=cfg.SEED,
+    )
+    print(f"  Soundscape split: {len(snd_train_df)} train windows "
+          f"/ {len(snd_val_df)} val windows "
+          f"(from {snd_val_df['filename'].nunique()} held-out files)")
+
+    # ── Datasets ──────────────────────────────────────────────────────────────
     bird_train_ds = BirdTrainDataset(
         train_df, cfg.TRAIN_AUDIO_DIR, species_info,
         train_audio_tf, mel_tf, spec_aug, cfg,
     )
     snd_train_ds = SoundscapeTrainDataset(
-        soundscape_df_path, cfg.TRAIN_SOUNDSCAPES_DIR, species_info,
+        snd_train_df, cfg.TRAIN_SOUNDSCAPES_DIR, species_info,
         train_audio_tf, mel_tf, spec_aug, cfg,
     )
     train_ds = ConcatDataset([bird_train_ds, snd_train_ds])
 
-    val_ds = BirdTrainDataset(
+    # Clip validation: all 234 species, stable signal for learning-curve tracking
+    clip_val_ds = BirdTrainDataset(
         val_df, cfg.TRAIN_AUDIO_DIR, species_info,
+        val_audio_tf, mel_tf, None, cfg,
+    )
+    # Soundscape validation: domain-matched to test set, used for checkpoint selection
+    snd_val_ds = SoundscapeTrainDataset(
+        snd_val_df, cfg.TRAIN_SOUNDSCAPES_DIR, species_info,
         val_audio_tf, mel_tf, None, cfg,
     )
 
     # ── Weighted sampler (class-imbalance) ────────────────────────────────────
     if cfg.USE_WEIGHTED_SAMPLER:
-        ssl_df = pd.read_csv(soundscape_df_path).drop_duplicates(
-            subset=["filename", "start", "end"]
-        )
         sample_weights = compute_sample_weights(
             train_df, len(snd_train_ds), power=cfg.SAMPLER_POWER
         )
@@ -277,14 +290,13 @@ def run_fold(
         train_loader = DataLoader(
             train_ds,
             batch_size=cfg.BATCH_SIZE,
-            sampler=sampler,          # mutually exclusive with shuffle=True
+            sampler=sampler,
             num_workers=cfg.NUM_WORKERS,
             pin_memory=cfg.PIN_MEMORY and device.type == "cuda",
             drop_last=True,
         )
         print(f"  WeightedRandomSampler enabled (power={cfg.SAMPLER_POWER})")
     else:
-        ssl_df = None
         train_loader = DataLoader(
             train_ds,
             batch_size=cfg.BATCH_SIZE,
@@ -294,8 +306,15 @@ def run_fold(
             drop_last=True,
         )
 
-    val_loader = DataLoader(
-        val_ds,
+    clip_val_loader = DataLoader(
+        clip_val_ds,
+        batch_size=cfg.BATCH_SIZE * 2,
+        shuffle=False,
+        num_workers=cfg.NUM_WORKERS,
+        pin_memory=cfg.PIN_MEMORY and device.type == "cuda",
+    )
+    snd_val_loader = DataLoader(
+        snd_val_ds,
         batch_size=cfg.BATCH_SIZE * 2,
         shuffle=False,
         num_workers=cfg.NUM_WORKERS,
@@ -304,23 +323,20 @@ def run_fold(
 
     # ── Loss with optional pos_weight (class-imbalance) ───────────────────────
     if cfg.USE_POS_WEIGHT:
-        if ssl_df is None:
-            ssl_df = pd.read_csv(soundscape_df_path).drop_duplicates(
-                subset=["filename", "start", "end"]
-            )
         pos_weight = compute_pos_weights(
-            train_df, ssl_df, species_info, max_weight=cfg.POS_WEIGHT_MAX
+            train_df, snd_train_df, species_info, max_weight=cfg.POS_WEIGHT_MAX
         ).to(device)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         print(f"  pos_weight enabled (max={cfg.POS_WEIGHT_MAX}, "
               f"mean={pos_weight.mean().item():.2f})")
     else:
         criterion = nn.BCEWithLogitsLoss()
+
     optimizer = get_optimizer(model, cfg)
     scheduler = get_scheduler(optimizer, cfg, steps_per_epoch=len(train_loader))
     scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
 
-    best_cmap = -1.0
+    best_ckpt_metric = -1.0
     best_ckpt_path = os.path.join(cfg.OUTPUT_DIR, f"fold{fold}_best.pth")
 
     for epoch in range(1, cfg.EPOCHS + 1):
@@ -329,33 +345,45 @@ def run_fold(
             model, train_loader, optimizer, criterion, scheduler,
             device, cfg, scaler, epoch,
         )
-        val_loss, val_cmap = validate_one_epoch(model, val_loader, criterion, device)
+        # Both validation passes share the same unweighted criterion for fair comparison
+        unweighted = nn.BCEWithLogitsLoss()
+        clip_val_loss, clip_cmap   = validate_one_epoch(model, clip_val_loader, unweighted, device)
+        _,             snd_cmap    = validate_one_epoch(model, snd_val_loader,  unweighted, device)
         elapsed = time.time() - t0
+
+        # Primary checkpoint metric: soundscape_cmAP (domain-matched to test)
+        # Secondary: clip_cmAP (stable learning-curve signal over all 234 species)
+        ckpt_metric = snd_cmap if cfg.CKPT_METRIC == "soundscape_cmap" else clip_cmap
 
         print(
             f"Epoch {epoch:02d}/{cfg.EPOCHS} | "
             f"train_loss={train_loss:.4f} | "
-            f"val_loss={val_loss:.4f} | "
-            f"val_cmAP={val_cmap:.4f} | "
+            f"clip_val_loss={clip_val_loss:.4f} | "
+            f"clip_cmAP={clip_cmap:.4f} | "
+            f"snd_cmAP={snd_cmap:.4f}* | "
             f"lr={scheduler.get_last_lr()[0]:.2e} | "
             f"time={elapsed:.0f}s"
         )
 
-        if val_cmap > best_cmap:
-            best_cmap = val_cmap
+        if ckpt_metric > best_ckpt_metric:
+            best_ckpt_metric = ckpt_metric
             torch.save(
                 {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
-                    "val_loss": val_loss,
-                    "val_cmap": val_cmap,
+                    "clip_val_loss": clip_val_loss,
+                    "clip_cmap": clip_cmap,
+                    "snd_cmap": snd_cmap,
+                    "ckpt_metric": cfg.CKPT_METRIC,
                     "cfg": cfg.__dict__.copy(),
                 },
                 best_ckpt_path,
             )
-            print(f"  ✓ saved best checkpoint (cmAP={val_cmap:.4f})")
+            print(f"  ✓ saved best checkpoint "
+                  f"(snd_cmAP={snd_cmap:.4f}, clip_cmAP={clip_cmap:.4f})")
 
-    print(f"\nFold {fold} done. Best cmAP = {best_cmap:.4f}  →  {best_ckpt_path}")
+    print(f"\nFold {fold} done. Best {cfg.CKPT_METRIC} = {best_ckpt_metric:.4f}"
+          f"  →  {best_ckpt_path}")
     return best_ckpt_path
 
 
