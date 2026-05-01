@@ -1,0 +1,112 @@
+import os
+import torch
+
+
+class CFG:
+    # ── Environment ───────────────────────────────────────────────────────────
+    IS_KAGGLE: bool = False
+
+    # ── Paths (filled by resolve_paths) ──────────────────────────────────────
+    LOCAL_DATA_DIR: str = "/Users/liuqihang/Research/BirdCLEF+ 2026"
+    KAGGLE_DATA_DIR: str = "/kaggle/input/birdclef-2026"
+
+    DATA_DIR: str = ""
+    TRAIN_AUDIO_DIR: str = ""
+    TRAIN_SOUNDSCAPES_DIR: str = ""
+    TEST_SOUNDSCAPES_DIR: str = ""
+    TRAIN_CSV: str = ""
+    TAXONOMY_CSV: str = ""
+    TRAIN_SOUNDSCAPES_LABELS_CSV: str = ""
+    SAMPLE_SUBMISSION_CSV: str = ""
+    OUTPUT_DIR: str = ""
+
+    # Kaggle checkpoint dataset (where you upload trained weights)
+    KAGGLE_CKPT_DIR: str = "/kaggle/input/birdclef2026-checkpoints"
+
+    # ── Audio ─────────────────────────────────────────────────────────────────
+    SAMPLE_RATE: int = 32000
+    CLIP_DURATION: float = 5.0
+    N_SAMPLES: int = 160_000          # SAMPLE_RATE * CLIP_DURATION
+
+    # ── Mel spectrogram ───────────────────────────────────────────────────────
+    N_MELS: int = 128
+    N_FFT: int = 1024
+    HOP_LENGTH: int = 320             # → 100 frames/sec → 5 s ≈ 500 frames
+    FMIN: float = 20.0
+    FMAX: float = 16_000.0
+    TOP_DB: float = 80.0
+
+    # ── Image ─────────────────────────────────────────────────────────────────
+    IMG_SIZE: int = 256               # resize mel to (IMG_SIZE, IMG_SIZE)
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    MODEL_NAME: str = "tf_efficientnet_b4_ns"
+    NUM_CLASSES: int = 234
+    PRETRAINED: bool = True
+    IN_CHANNELS: int = 3
+    DROP_RATE: float = 0.3
+
+    # ── Training ──────────────────────────────────────────────────────────────
+    EPOCHS: int = 30
+    BATCH_SIZE: int = 32
+    NUM_WORKERS: int = 4
+    PIN_MEMORY: bool = True
+    SEED: int = 42
+    N_FOLDS: int = 5
+    TRAIN_FOLDS: list = None          # None → train all folds; [0] → fold 0 only
+
+    # ── Optimizer ─────────────────────────────────────────────────────────────
+    LR: float = 1e-3
+    WEIGHT_DECAY: float = 1e-4
+    MIN_LR: float = 1e-6
+    WARMUP_EPOCHS: int = 3
+
+    # ── Data filtering ────────────────────────────────────────────────────────
+    MIN_RATING: float = 0.0           # keep all clips; raise to 3.0 for quality filter
+    USE_SECONDARY_LABELS: bool = True
+
+    # ── Augmentation ──────────────────────────────────────────────────────────
+    FREQ_MASK_MAX: int = 30
+    TIME_MASK_MAX: int = 80
+    NUM_FREQ_MASKS: int = 2
+    NUM_TIME_MASKS: int = 2
+    MIXUP_ALPHA: float = 0.5
+    MIXUP_PROB: float = 0.5
+
+    # ── Inference ─────────────────────────────────────────────────────────────
+    INFER_BATCH_SIZE: int = 64
+
+    # ── Device ────────────────────────────────────────────────────────────────
+    DEVICE: str = "auto"              # "auto" → mps / cuda / cpu
+
+
+def resolve_paths(cfg: CFG) -> None:
+    """Fill all path attributes based on IS_KAGGLE flag."""
+    if cfg.IS_KAGGLE:
+        cfg.DATA_DIR = cfg.KAGGLE_DATA_DIR
+    else:
+        cfg.DATA_DIR = cfg.LOCAL_DATA_DIR
+
+    cfg.TRAIN_AUDIO_DIR = os.path.join(cfg.DATA_DIR, "train_audio")
+    cfg.TRAIN_SOUNDSCAPES_DIR = os.path.join(cfg.DATA_DIR, "train_soundscapes")
+    cfg.TEST_SOUNDSCAPES_DIR = os.path.join(cfg.DATA_DIR, "test_soundscapes")
+    cfg.TRAIN_CSV = os.path.join(cfg.DATA_DIR, "train.csv")
+    cfg.TAXONOMY_CSV = os.path.join(cfg.DATA_DIR, "taxonomy.csv")
+    cfg.TRAIN_SOUNDSCAPES_LABELS_CSV = os.path.join(cfg.DATA_DIR, "train_soundscapes_labels.csv")
+    cfg.SAMPLE_SUBMISSION_CSV = os.path.join(cfg.DATA_DIR, "sample_submission.csv")
+
+    if cfg.IS_KAGGLE:
+        cfg.OUTPUT_DIR = "/kaggle/working"
+    else:
+        cfg.OUTPUT_DIR = os.path.join(cfg.LOCAL_DATA_DIR, "outputs")
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+
+
+def get_device(cfg: CFG) -> torch.device:
+    if cfg.DEVICE == "auto":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+    return torch.device(cfg.DEVICE)

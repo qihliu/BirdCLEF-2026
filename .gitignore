@@ -1,0 +1,44 @@
+# ── Competition data (download from Kaggle, do not commit) ────────────────────
+*.zip
+*.ogg
+*.mp3
+*.wav
+train_audio/
+train_soundscapes/
+test_soundscapes/
+train.csv
+train_soundscapes_labels.csv
+sample_submission.csv
+taxonomy.csv
+recording_location.txt
+
+# ── Model outputs ─────────────────────────────────────────────────────────────
+outputs/
+*.pth
+*.pt
+submission.csv
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# ── Environment ───────────────────────────────────────────────────────────────
+.env
+.venv/
+venv/
+env/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
