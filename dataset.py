@@ -215,7 +215,7 @@ class BirdTrainDataset(Dataset):
         path = os.path.join(self.audio_base_dir, str(row["filename"]))
 
         try:
-            waveform, _ = librosa.load(path, sr=None, mono=True)
+            waveform, _ = librosa.load(path, sr=self.cfg.SAMPLE_RATE, mono=True)
             if len(waveform) == 0:
                 raise ValueError("empty audio")
         except Exception:
