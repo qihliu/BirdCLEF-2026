@@ -389,8 +389,14 @@ class SoundscapeInferenceDataset(Dataset):
     """
     Enumerates all 5-second windows across every .ogg file in soundscapes_dir.
 
-    Uses soundfile.info for fast duration probing (reads header only).
-    Loads audio lazily per window with librosa (offset + duration params).
+    Each soundscape is loaded ONCE (on first access) and cached for the
+    lifetime of the dataset. Windows are sliced from the in-memory waveform,
+    so each file is read from disk exactly once regardless of how many windows
+    it contains.
+
+    IMPORTANT: use num_workers=0 in the DataLoader. With workers > 0 each
+    worker gets its own copy of the cache, breaking the one-load-per-file
+    guarantee and causing redundant I/O.
 
     Each item: (image_tensor [3, IMG_SIZE, IMG_SIZE], row_id string)
     row_id format: "{stem}_{end_second}"
@@ -403,52 +409,62 @@ class SoundscapeInferenceDataset(Dataset):
         mel_transform: MelSpecTransform,
         cfg: CFG,
     ):
-        self.audio_tf = audio_transform
-        self.mel_tf   = mel_transform
-        self.sr       = cfg.SAMPLE_RATE
+        self.audio_tf  = audio_transform
+        self.mel_tf    = mel_transform
+        self.sr        = cfg.SAMPLE_RATE
         self.n_samples = cfg.N_SAMPLES
-        self.clip_dur = cfg.CLIP_DURATION
+        self.clip_dur  = cfg.CLIP_DURATION
 
-        # Build flat list of (filepath, start_sec, end_sec, row_id)
-        self.items: List[Tuple[str, float, float, str]] = []
+        # One-entry file cache: stores the last-loaded (fpath, waveform) pair.
+        # With shuffle=False and items ordered by file this gives a 100% hit
+        # rate — each file is loaded exactly once.
+        self._cached_fpath: Optional[str] = None
+        self._cached_wav:   Optional[np.ndarray] = None
+
+        # Build flat list of (filepath, start_sample, end_sample, row_id).
+        # Sample offsets are pre-computed so __getitem__ only slices memory.
+        self.items: List[Tuple[str, int, int, str]] = []
         ogg_files = sorted(
             f for f in os.listdir(soundscapes_dir)
             if f.lower().endswith(".ogg")
         )
         for fname in ogg_files:
             fpath = os.path.join(soundscapes_dir, fname)
-            stem = os.path.splitext(fname)[0]
+            stem  = os.path.splitext(fname)[0]
             try:
-                info = sf.info(fpath)
+                info     = sf.info(fpath)
                 duration = info.frames / info.samplerate
             except Exception:
                 continue
 
             end = self.clip_dur
             while end <= duration + 1e-3:
-                start = end - self.clip_dur
-                row_id = f"{stem}_{int(end)}"
-                self.items.append((fpath, start, end, row_id))
+                start_sample = int((end - self.clip_dur) * self.sr)
+                end_sample   = int(end * self.sr)
+                row_id       = f"{stem}_{int(end)}"
+                self.items.append((fpath, start_sample, end_sample, row_id))
                 end += self.clip_dur
+
+    def _load_file(self, fpath: str) -> np.ndarray:
+        if fpath != self._cached_fpath:
+            wav, _ = librosa.load(fpath, sr=self.sr, mono=True)
+            self._cached_fpath = fpath
+            self._cached_wav   = wav
+        return self._cached_wav
 
     def __len__(self) -> int:
         return len(self.items)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, str]:
-        fpath, start_sec, end_sec, row_id = self.items[idx]
+        fpath, start_sample, end_sample, row_id = self.items[idx]
         try:
-            wav, _ = librosa.load(
-                fpath,
-                sr=self.sr,
-                mono=True,
-                offset=float(start_sec),
-                duration=float(self.clip_dur),
-            )
-            if len(wav) == 0:
+            wav    = self._load_file(fpath)
+            window = wav[start_sample:end_sample].copy()
+            if len(window) == 0:
                 raise ValueError("empty")
         except Exception:
-            wav = np.zeros(self.n_samples, dtype=np.float32)
+            window = np.zeros(self.n_samples, dtype=np.float32)
 
-        wav = self.audio_tf(wav)
+        wav = self.audio_tf(window)
         img = self.mel_tf(wav)
         return torch.from_numpy(img), row_id

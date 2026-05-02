@@ -26,6 +26,7 @@ from transforms import AudioTransform, MelSpecTransform
 
 
 def load_model(checkpoint_path: str, cfg: CFG, device: torch.device) -> BirdModel:
+    cfg.PRETRAINED = False
     model = BirdModel(cfg)
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -45,7 +46,7 @@ def run_inference(
     device: torch.device,
 ) -> tuple:
     all_row_ids: list = []
-    all_probs_sum: np.ndarray | None = None
+    all_probs: list[np.ndarray] = []
 
     for images, row_ids in tqdm(loader, desc="Inference"):
         images = images.to(device, non_blocking=True)
@@ -57,12 +58,11 @@ def run_inference(
         batch_avg = batch_sum / len(models)
 
         all_row_ids.extend(row_ids)
-        if all_probs_sum is None:
-            all_probs_sum = batch_avg
-        else:
-            all_probs_sum = np.concatenate([all_probs_sum, batch_avg], axis=0)
+        all_probs.append(batch_avg)
 
-    return all_row_ids, all_probs_sum
+    if not all_probs:
+        return all_row_ids, np.empty((0, 0), dtype=np.float32)
+    return all_row_ids, np.concatenate(all_probs, axis=0)
 
 
 def build_submission(
@@ -140,7 +140,7 @@ def main() -> None:
         dataset,
         batch_size=cfg.INFER_BATCH_SIZE,
         shuffle=False,
-        num_workers=cfg.NUM_WORKERS,
+        num_workers=0,   # must be 0: file cache lives in main process
         pin_memory=cfg.PIN_MEMORY and device.type == "cuda",
     )
     print(f"Total windows to predict: {len(dataset)}\n")
