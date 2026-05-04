@@ -1,0 +1,17 @@
+{
+  "id": "qqqqhl0/birdclef-2026-submission",
+  "title": "BirdCLEF 2026 Submission",
+  "code_file": "submission.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": false,
+  "dataset_sources": [
+    "qqqqhl0/birdclef2026-checkpoints"
+  ],
+  "competition_sources": [
+    "birdclef-2026"
+  ],
+  "kernel_sources": []
+}
