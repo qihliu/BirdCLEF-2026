@@ -260,7 +260,7 @@ class BirdTrainDataset(Dataset):
             img = self.spec_aug(img)
 
         label = self._labels[idx]
-        return torch.from_numpy(img), torch.from_numpy(label)
+        return torch.from_numpy(img), torch.from_numpy(label), torch.tensor(1.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,7 +381,7 @@ class SoundscapeTrainDataset(Dataset):
         if self.spec_aug is not None:
             img = self.spec_aug(img)
 
-        return torch.from_numpy(img), torch.from_numpy(self._labels[idx])
+        return torch.from_numpy(img), torch.from_numpy(self._labels[idx]), torch.tensor(1.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -471,3 +471,99 @@ class SoundscapeInferenceDataset(Dataset):
         wav = self.audio_tf(window)
         img = self.mel_tf(wav)
         return torch.from_numpy(img), row_id
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pseudo-labeled dataset (Stage 2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PseudoLabeledDataset(Dataset):
+    """
+    Soundscape windows with soft pseudo-labels produced by the Stage 1 model.
+
+    Soft labels are the raw model probabilities (float16 → float32), not 0/1.
+    Per-class values below PSEUDO_LABEL_THRESHOLD are zeroed out to reduce
+    noise from near-zero predictions.
+
+    Each item returns (image, soft_label, sample_weight) where:
+      soft_label     — float32 vector in [0, 1], shape (NUM_CLASSES,)
+      sample_weight  — max_prob of the window × PSEUDO_LOSS_WEIGHT
+                       (higher confidence → larger gradient contribution)
+
+    Use num_workers=0 in the DataLoader so the file cache works correctly.
+    """
+
+    def __init__(
+        self,
+        meta_csv_path: str,
+        probs_npy_path: str,
+        soundscapes_dir: str,
+        audio_transform: AudioTransform,
+        mel_transform: MelSpecTransform,
+        cfg: CFG,
+    ):
+        meta = pd.read_csv(meta_csv_path)
+        probs = np.load(probs_npy_path).astype(np.float32)  # (N, NUM_CLASSES)
+
+        assert len(meta) == len(probs), "meta and probs row counts must match"
+
+        # Filter by confidence
+        keep = meta["max_prob"].values >= cfg.PSEUDO_MIN_CONFIDENCE
+        meta  = meta[keep].reset_index(drop=True)
+        probs = probs[keep]
+
+        # Zero out per-class probabilities below label threshold (noise reduction)
+        probs[probs < cfg.PSEUDO_LABEL_THRESHOLD] = 0.0
+
+        self.soundscapes_dir = soundscapes_dir
+        self.audio_tf  = audio_transform
+        self.mel_tf    = mel_transform
+        self.sr        = cfg.SAMPLE_RATE
+        self.n_samples = cfg.N_SAMPLES
+        self.pseudo_loss_weight = cfg.PSEUDO_LOSS_WEIGHT
+
+        # Pre-compute sample offsets and weights
+        self._fpaths       = [
+            os.path.join(soundscapes_dir, fn)
+            for fn in meta["filename"].tolist()
+        ]
+        self._start_samples = (meta["start_sec"].values * self.sr).astype(int)
+        self._end_samples   = (meta["end_sec"].values   * self.sr).astype(int)
+        self._soft_labels   = probs                              # (N, NUM_CLASSES)
+        self._weights       = (meta["max_prob"].values * self.pseudo_loss_weight).astype(np.float32)
+
+        # One-entry file cache (same pattern as SoundscapeInferenceDataset)
+        self._cached_fpath: Optional[str] = None
+        self._cached_wav:   Optional[np.ndarray] = None
+
+    def _load_file(self, fpath: str) -> np.ndarray:
+        if fpath != self._cached_fpath:
+            wav, _ = librosa.load(fpath, sr=self.sr, mono=True)
+            self._cached_fpath = fpath
+            self._cached_wav   = wav
+        return self._cached_wav
+
+    def __len__(self) -> int:
+        return len(self._fpaths)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        fpath = self._fpaths[idx]
+        try:
+            wav    = self._load_file(fpath)
+            window = wav[self._start_samples[idx]:self._end_samples[idx]].copy()
+            if len(window) == 0:
+                raise ValueError("empty")
+        except Exception:
+            window = np.zeros(self.n_samples, dtype=np.float32)
+
+        window = self.audio_tf(window)
+        img    = self.mel_tf(window)
+
+        soft_label = self._soft_labels[idx]          # float32, (NUM_CLASSES,)
+        weight     = float(self._weights[idx])
+
+        return (
+            torch.from_numpy(img),
+            torch.from_numpy(soft_label),
+            torch.tensor(weight),
+        )
