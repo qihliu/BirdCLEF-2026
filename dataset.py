@@ -92,11 +92,12 @@ def compute_sample_weights(
       contribute neutrally (domain-adaptation signal, not imbalance correction).
     """
     counts = bird_df["primary_label"].astype(str).value_counts()
-    bird_weights = torch.tensor(
-        [1.0 / (float(counts.get(str(row["primary_label"]), 1)) ** power)
-         for _, row in bird_df.iterrows()],
-        dtype=torch.float32,
+    labels = bird_df["primary_label"].astype(str).values
+    raw_w  = np.array(
+        [1.0 / (float(counts.get(lbl, 1)) ** power) for lbl in labels],
+        dtype=np.float32,
     )
+    bird_weights = torch.from_numpy(raw_w)
     mean_w = bird_weights.mean().item()
     snd_weights = torch.full((n_soundscape_windows,), mean_w, dtype=torch.float32)
     return torch.cat([bird_weights, snd_weights])
@@ -125,12 +126,14 @@ def compute_pos_weights(
     n_classes = len(label_to_idx)
     pos_counts = np.zeros(n_classes, dtype=np.float64)
 
-    # Positives from train_audio clips
-    for _, row in bird_df.iterrows():
-        idx = label_to_idx.get(str(row["primary_label"]))
+    # Positives from train_audio clips — primary labels (vectorised)
+    for lbl, cnt in bird_df["primary_label"].astype(str).value_counts().items():
+        idx = label_to_idx.get(lbl)
         if idx is not None:
-            pos_counts[idx] += 1.0
-        for sec in _parse_secondary(str(row["secondary_labels"])):
+            pos_counts[idx] += float(cnt)
+    # Secondary labels (need per-row parsing, but iterate the raw column only)
+    for raw in bird_df["secondary_labels"]:
+        for sec in _parse_secondary(str(raw)):
             sidx = label_to_idx.get(sec)
             if sidx is not None:
                 pos_counts[sidx] += 1.0
@@ -217,22 +220,22 @@ class BirdTrainDataset(Dataset):
         self.use_secondary = cfg.USE_SECONDARY_LABELS
         self.sr = cfg.SAMPLE_RATE
 
-        # Precompute secondary label lists (avoid ast.literal_eval in hot path)
+        # Precompute secondary label lists and label vectors.
+        # itertuples() is ~10x faster than iterrows() for large DataFrames.
         self._secondary = [
-            _parse_secondary(row["secondary_labels"])
-            for _, row in self.df.iterrows()
+            _parse_secondary(str(row.secondary_labels))
+            for row in self.df.itertuples(index=False)
         ]
-        # Precompute label vectors
         self._labels = np.stack(
             [
                 build_multilabel_vector(
-                    str(row["primary_label"]),
+                    str(row.primary_label),
                     self._secondary[i],
                     self.label_to_idx,
                     self.n_classes,
                     self.use_secondary,
                 )
-                for i, (_, row) in enumerate(self.df.iterrows())
+                for i, row in enumerate(self.df.itertuples(index=False))
             ],
             axis=0,
         )
