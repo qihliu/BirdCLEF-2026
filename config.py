@@ -1,4 +1,5 @@
 import os
+import platform
 import torch
 
 
@@ -40,7 +41,9 @@ class CFG:
     IMG_SIZE: int = 256               # resize mel to (IMG_SIZE, IMG_SIZE)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    MODEL_NAME: str = "tf_efficientnet_b4_ns"
+    # B0 NoisyStudent: CPU inference ~41 min for 6000 windows — within 90-min limit.
+    # B4 NoisyStudent: CPU inference ~94 min — exceeds the competition limit.
+    MODEL_NAME: str = "tf_efficientnet_b0_ns"
     NUM_CLASSES: int = 234
     PRETRAINED: bool = True
     IN_CHANNELS: int = 3
@@ -49,7 +52,9 @@ class CFG:
     # ── Training ──────────────────────────────────────────────────────────────
     EPOCHS: int = 30
     BATCH_SIZE: int = 32
-    NUM_WORKERS: int = 4
+    # macOS uses "spawn" multiprocessing (not fork like Linux), adding heavy
+    # overhead per worker. Use 0 on Mac; Kaggle Linux gets full parallelism.
+    NUM_WORKERS: int = 0 if platform.system() == "Darwin" else 4
     PIN_MEMORY: bool = True
     SEED: int = 42
     N_FOLDS: int = 5
